@@ -1,0 +1,131 @@
+name: Export Voyager Cards CSV
+
+on:
+  push:
+    branches:
+      - chatgpt/export-voyager-csv
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Export card records
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv
+          import json
+          import re
+          from pathlib import Path
+
+          src = Path("data/hub_db.json")
+          outdir = Path("export-output")
+          outdir.mkdir(exist_ok=True)
+          out = outdir / "Voyager_Cards_Master.csv"
+          summary_path = outdir / "Voyager_Cards_Master.summary.json"
+
+          with src.open("r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          def norm(key):
+              return re.sub(r"[^a-z0-9]", "", str(key).lower())
+
+          name_keys = {"name", "cardname", "fullname"}
+          rule_keys = {"rulestext", "rulestext", "oracletext", "text"}
+          type_keys = {"typeline", "cardtype", "type"}
+          cost_keys = {"manacost", "cost"}
+          rarity_keys = {"rarity", "rarityline"}
+          stat_keys = {"power", "toughness", "loyalty"}
+
+          rows = []
+
+          def looks_like_card(obj):
+              if not isinstance(obj, dict):
+                  return False
+              keys = {norm(k) for k in obj.keys()}
+              has_name = bool(keys & name_keys)
+              marker_groups = sum(bool(keys & g) for g in (rule_keys, type_keys, cost_keys, rarity_keys, stat_keys))
+              return has_name and marker_groups >= 2
+
+          def walk(obj, path="$"):
+              if isinstance(obj, dict):
+                  if looks_like_card(obj):
+                      rows.append((path, obj))
+                      return
+                  for k, v in obj.items():
+                      walk(v, f"{path}.{k}")
+              elif isinstance(obj, list):
+                  for i, v in enumerate(obj):
+                      walk(v, f"{path}[{i}]")
+
+          walk(data)
+
+          def lookup(obj, candidates):
+              by_norm = {norm(k): v for k, v in obj.items()}
+              for c in candidates:
+                  v = by_norm.get(c)
+                  if v not in (None, "", [], {}):
+                      if isinstance(v, (dict, list)):
+                          return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+                      return v
+              return ""
+
+          canonical = [
+              ("Name", ["name", "cardname", "fullname"]),
+              ("Mana Cost", ["manacost", "cost"]),
+              ("Type Line", ["typeline", "cardtype", "type"]),
+              ("Rarity", ["rarity", "rarityline"]),
+              ("Rules Text", ["rulestext", "oracletext", "text"]),
+              ("Power", ["power"]),
+              ("Toughness", ["toughness"]),
+              ("Loyalty", ["loyalty"]),
+              ("Set Code", ["setcode", "setid", "set"]),
+              ("Set Name", ["setname"]),
+              ("Designer", ["designer", "author", "creator"]),
+          ]
+
+          raw_keys = sorted({str(k) for _, obj in rows for k in obj.keys()}, key=lambda s: s.lower())
+          headers = [x[0] for x in canonical] + ["Source Path"] + [f"raw:{k}" for k in raw_keys]
+
+          with out.open("w", encoding="utf-8-sig", newline="") as f:
+              w = csv.writer(f)
+              w.writerow(headers)
+              for path, obj in rows:
+                  row = [lookup(obj, candidates) for _, candidates in canonical]
+                  row.append(path)
+                  for k in raw_keys:
+                      v = obj.get(k, "")
+                      if isinstance(v, (dict, list)):
+                          v = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+                      elif v is None:
+                          v = ""
+                      row.append(v)
+                  w.writerow(row)
+
+          top = {
+              "source_file": str(src),
+              "source_bytes": src.stat().st_size,
+              "top_level_type": type(data).__name__,
+              "top_level_keys": list(data.keys())[:100] if isinstance(data, dict) else None,
+              "card_records_found": len(rows),
+              "csv_columns": len(headers),
+              "source_paths_sample": [p for p, _ in rows[:20]],
+              "output_file": str(out),
+              "output_bytes": out.stat().st_size,
+          }
+          summary_path.write_text(json.dumps(top, indent=2, ensure_ascii=False), encoding="utf-8")
+          print(json.dumps(top, indent=2))
+          PY
+
+      - name: Upload CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: voyager-card-export
+          path: export-output/
+          if-no-files-found: error
