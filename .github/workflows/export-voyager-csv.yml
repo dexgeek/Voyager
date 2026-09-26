@@ -30,7 +30,7 @@ jobs:
           out = outdir / "Voyager_Cards_Master.csv"
           summary_path = outdir / "Voyager_Cards_Master.summary.json"
 
-          with src.open("r", encoding="utf-8") as f:
+          with src.open("r", encoding="utf-8-sig") as f:
               data = json.load(f)
 
           def norm(key):
